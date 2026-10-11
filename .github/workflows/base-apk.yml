@@ -1,0 +1,115 @@
+name: Recover NoomiClone IL2CPP Files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip zip jq
+
+      - name: Validate APK bundle
+        run: |
+          set -eu
+          test -f input/NoomiClone_2.3.1.apks
+          mkdir -p work/bundle work/unpacked analysis
+
+      - name: Extract APK splits
+        run: |
+          set -eu
+          unzip -q input/NoomiClone_2.3.1.apks \
+            -d work/bundle
+
+          find work/bundle -type f -name '*.apk' \
+            -exec sh -c '
+              for apk do
+                name=$(basename "$apk" .apk)
+                mkdir -p "work/unpacked/$name"
+                unzip -oq "$apk" -d "work/unpacked/$name"
+              done
+            ' sh {} +
+
+      - name: Recover IL2CPP binary and metadata
+        run: |
+          set -eu
+
+          LIB="$(find work/unpacked -type f \
+            -name libil2cpp.so -print -quit)"
+
+          META="$(find work/unpacked -type f \
+            -name global-metadata.dat -print -quit)"
+
+          if [ -z "$LIB" ]; then
+            echo "::error::libil2cpp.so not found in APK splits"
+            exit 1
+          fi
+
+          if [ -z "$META" ]; then
+            echo "::error::global-metadata.dat not found"
+            exit 1
+          fi
+
+          cp "$LIB" analysis/libil2cpp.so
+          cp "$META" analysis/global-metadata.dat
+
+          file analysis/libil2cpp.so
+          sha256sum analysis/libil2cpp.so \
+            analysis/global-metadata.dat \
+            > analysis/SHA256SUMS.txt
+
+      - name: Get Il2CppDumper source
+        run: |
+          git clone --depth 1 \
+            https://github.com/Perfare/Il2CppDumper.git \
+            work/Il2CppDumper
+
+      - name: Build Il2CppDumper
+        run: |
+          set -eu
+          dotnet build \
+            work/Il2CppDumper/Il2CppDumper/Il2CppDumper.csproj \
+            -c Release
+
+      - name: Generate dump
+        run: |
+          set -eu
+
+          PROJECT="work/Il2CppDumper/Il2CppDumper/Il2CppDumper.csproj"
+
+          dotnet run --no-build -c Release \
+            --project "$PROJECT" -- \
+            "$PWD/analysis/libil2cpp.so" \
+            "$PWD/analysis/global-metadata.dat" \
+            "$PWD/analysis/output"
+
+          test -f analysis/output/dump.cs
+
+      - name: Upload recovered files
+        uses: actions/upload-artifact@v4
+        with:
+          name: noomclone-recovered-analysis
+          path: analysis/
+          if-no-files-found: error
+          retention-days: 7
